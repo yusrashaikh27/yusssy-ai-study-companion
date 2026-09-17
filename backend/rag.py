@@ -2,9 +2,34 @@ import os
 import json
 import math
 import re
-import shutil
+import io
 
 import numpy as np
+
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+
+# --------------------------------------------------
+# SUPABASE
+# --------------------------------------------------
+
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise RuntimeError(
+        "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set."
+    )
+
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_KEY
+)
+
+STORAGE_BUCKET = "pdfs"
 
 
 # --------------------------------------------------
@@ -13,6 +38,7 @@ import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Local folder kept only for temporary/backward compatibility.
 DATA_DIR = os.path.join(BASE_DIR, "documents")
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -207,16 +233,13 @@ def save_document(
     chunks,
     embeddings
 ):
+    """
+    Save RAG data to Supabase Storage.
 
-    document_folder = os.path.join(
-        DATA_DIR,
-        document_id
-    )
-
-    os.makedirs(
-        document_folder,
-        exist_ok=True
-    )
+    Files:
+        rag/<document_id>/metadata.json
+        rag/<document_id>/embeddings.npy
+    """
 
     # Rebuild TF-IDF metadata so the same
     # vocabulary can be used for questions.
@@ -230,33 +253,98 @@ def save_document(
         "idf": idf
     }
 
-    metadata_path = os.path.join(
-        document_folder,
-        "metadata.json"
+    # ----------------------------------------------
+    # Metadata JSON -> bytes
+    # ----------------------------------------------
+
+    metadata_bytes = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        indent=2
+    ).encode("utf-8")
+
+    metadata_path = (
+        f"rag/{document_id}/metadata.json"
     )
 
-    with open(
-        metadata_path,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    # ----------------------------------------------
+    # Embeddings NumPy -> bytes
+    # ----------------------------------------------
 
-        json.dump(
-            metadata,
-            file,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    embeddings_path = os.path.join(
-        document_folder,
-        "embeddings.npy"
-    )
+    buffer = io.BytesIO()
 
     np.save(
-        embeddings_path,
+        buffer,
         embeddings
     )
+
+    embeddings_bytes = buffer.getvalue()
+
+    embeddings_path = (
+        f"rag/{document_id}/embeddings.npy"
+    )
+
+    # ----------------------------------------------
+    # Upload metadata
+    # ----------------------------------------------
+
+    try:
+
+        supabase.storage.from_(
+            STORAGE_BUCKET
+        ).upload(
+            metadata_path,
+            metadata_bytes,
+            {
+                "content-type": "application/json",
+                "upsert": "true"
+            }
+        )
+
+        print(
+            "SUPABASE RAG METADATA UPLOAD SUCCESS:",
+            metadata_path
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG METADATA UPLOAD ERROR:",
+            repr(e)
+        )
+
+        raise
+
+    # ----------------------------------------------
+    # Upload embeddings
+    # ----------------------------------------------
+
+    try:
+
+        supabase.storage.from_(
+            STORAGE_BUCKET
+        ).upload(
+            embeddings_path,
+            embeddings_bytes,
+            {
+                "content-type": "application/octet-stream",
+                "upsert": "true"
+            }
+        )
+
+        print(
+            "SUPABASE RAG EMBEDDINGS UPLOAD SUCCESS:",
+            embeddings_path
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG EMBEDDINGS UPLOAD ERROR:",
+            repr(e)
+        )
+
+        raise
 
 
 # --------------------------------------------------
@@ -264,39 +352,68 @@ def save_document(
 # --------------------------------------------------
 
 def load_document(document_id):
+    """
+    Load RAG data from Supabase Storage.
+    """
 
-    document_folder = os.path.join(
-        DATA_DIR,
-        document_id
+    metadata_path = (
+        f"rag/{document_id}/metadata.json"
     )
 
-    metadata_path = os.path.join(
-        document_folder,
-        "metadata.json"
+    embeddings_path = (
+        f"rag/{document_id}/embeddings.npy"
     )
 
-    embeddings_path = os.path.join(
-        document_folder,
-        "embeddings.npy"
-    )
+    # ----------------------------------------------
+    # Download metadata
+    # ----------------------------------------------
 
-    if not os.path.exists(metadata_path):
+    try:
+
+        metadata_bytes = (
+            supabase.storage
+            .from_(STORAGE_BUCKET)
+            .download(metadata_path)
+        )
+
+        metadata = json.loads(
+            metadata_bytes.decode("utf-8")
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG METADATA DOWNLOAD ERROR:",
+            repr(e)
+        )
+
         return None
 
-    if not os.path.exists(embeddings_path):
+    # ----------------------------------------------
+    # Download embeddings
+    # ----------------------------------------------
+
+    try:
+
+        embeddings_bytes = (
+            supabase.storage
+            .from_(STORAGE_BUCKET)
+            .download(embeddings_path)
+        )
+
+        embeddings = np.load(
+            io.BytesIO(embeddings_bytes),
+            allow_pickle=False
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG EMBEDDINGS DOWNLOAD ERROR:",
+            repr(e)
+        )
+
         return None
-
-    with open(
-        metadata_path,
-        "r",
-        encoding="utf-8"
-    ) as file:
-
-        metadata = json.load(file)
-
-    embeddings = np.load(
-        embeddings_path
-    )
 
     return {
         "document_id":
@@ -324,39 +441,51 @@ def load_document(document_id):
 # --------------------------------------------------
 
 def list_documents():
+    """
+    List documents from Supabase RAG storage.
+    """
 
     documents = []
 
-    if not os.path.exists(DATA_DIR):
+    try:
+
+        folders = (
+            supabase.storage
+            .from_(STORAGE_BUCKET)
+            .list("rag")
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG LIST ERROR:",
+            repr(e)
+        )
+
         return documents
 
-    for document_id in os.listdir(DATA_DIR):
+    for item in folders:
 
-        document_folder = os.path.join(
-            DATA_DIR,
-            document_id
-        )
+        document_id = item.get("name")
 
-        if not os.path.isdir(document_folder):
+        if not document_id:
             continue
 
-        metadata_path = os.path.join(
-            document_folder,
-            "metadata.json"
+        metadata_path = (
+            f"rag/{document_id}/metadata.json"
         )
-
-        if not os.path.exists(metadata_path):
-            continue
 
         try:
 
-            with open(
-                metadata_path,
-                "r",
-                encoding="utf-8"
-            ) as file:
+            metadata_bytes = (
+                supabase.storage
+                .from_(STORAGE_BUCKET)
+                .download(metadata_path)
+            )
 
-                metadata = json.load(file)
+            metadata = json.loads(
+                metadata_bytes.decode("utf-8")
+            )
 
             documents.append({
                 "document_id":
@@ -369,7 +498,14 @@ def list_documents():
                     len(metadata["chunks"])
             })
 
-        except Exception:
+        except Exception as e:
+
+            print(
+                "SUPABASE RAG DOCUMENT READ ERROR:",
+                document_id,
+                repr(e)
+            )
+
             continue
 
     return documents
@@ -406,10 +542,6 @@ def search_document(
     # --------------------------------------------------
     # Backward compatibility
     # --------------------------------------------------
-
-    # Old documents created with the previous
-    # SentenceTransformer system won't have
-    # TF-IDF metadata.
 
     if not vocabulary or not idf:
 
@@ -505,19 +637,42 @@ def search_document(
 # --------------------------------------------------
 
 def delete_document(document_id):
+    """
+    Delete RAG data from Supabase Storage.
+    """
 
-    document_folder = os.path.join(
-        DATA_DIR,
-        document_id
+    metadata_path = (
+        f"rag/{document_id}/metadata.json"
     )
 
-    if not os.path.exists(
-        document_folder
-    ):
+    embeddings_path = (
+        f"rag/{document_id}/embeddings.npy"
+    )
+
+    try:
+
+        result = (
+            supabase.storage
+            .from_(STORAGE_BUCKET)
+            .remove([
+                metadata_path,
+                embeddings_path
+            ])
+        )
+
+        print(
+            "SUPABASE RAG DELETE SUCCESS:",
+            document_id,
+            result
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "SUPABASE RAG DELETE ERROR:",
+            repr(e)
+        )
+
         return False
-
-    shutil.rmtree(
-        document_folder
-    )
-
-    return True

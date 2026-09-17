@@ -508,19 +508,77 @@ def remove_document(
     document_id: str
 ):
 
-    deleted = delete_document(
+    # ------------------------------------------
+    # CHECK DOCUMENT
+    # ------------------------------------------
+
+    document = load_document(
         document_id
     )
 
-    if not deleted:
+    if document is None:
 
         return {
             "error":
                 "Document not found."
         }
 
+    filename = document["filename"]
+
+    # ------------------------------------------
+    # DELETE RAG DATA
+    # ------------------------------------------
+
+    rag_deleted = delete_document(
+        document_id
+    )
+
+    if not rag_deleted:
+
+        return {
+            "error":
+                "Could not delete RAG data."
+        }
+
+    # ------------------------------------------
+    # DELETE ORIGINAL PDF
+    # ------------------------------------------
+
+    storage_path = (
+        f"{document_id}/{filename}"
+    )
+
+    try:
+
+        supabase.storage.from_(
+            "pdfs"
+        ).remove([
+            storage_path
+        ])
+
+        print(
+            "SUPABASE PDF DELETE SUCCESS:",
+            storage_path
+        )
+
+    except Exception as e:
+
+        print(
+            "SUPABASE PDF DELETE ERROR:",
+            repr(e)
+        )
+
+        return {
+            "error":
+                f"RAG deleted, but PDF deletion failed: {str(e)}"
+        }
+
+    # ------------------------------------------
+    # RESPONSE
+    # ------------------------------------------
+
     return {
 
         "message":
-            "Document deleted successfully."
+            "Document and RAG data deleted successfully."
     }
