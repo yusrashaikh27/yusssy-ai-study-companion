@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
-
+from supabase import create_client, Client
 import httpx
 import os
 import uuid
@@ -32,7 +32,13 @@ GROQ_API_KEY = os.getenv(
 GROQ_URL = (
     "https://api.groq.com/openai/v1/chat/completions"
 )
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
+supabase: Client = create_client(
+    SUPABASE_URL,
+    SUPABASE_SERVICE_KEY
+)
 
 # --------------------------------------------------
 # FASTAPI
@@ -135,7 +141,6 @@ async def chat(
 # --------------------------------------------------
 # UPLOAD PDF
 # --------------------------------------------------
-
 @app.post("/upload-pdf")
 async def upload_pdf(
     file: UploadFile = File(...)
@@ -159,10 +164,12 @@ async def upload_pdf(
     with open(temp_path, "wb") as pdf_file:
         pdf_file.write(contents)
 
+    document = None
+
     try:
 
         # ------------------------------------------
-        # EXTRACT TEXT USING PYMUPDF
+        # EXTRACT TEXT
         # ------------------------------------------
 
         document = fitz.open(temp_path)
@@ -170,7 +177,6 @@ async def upload_pdf(
         text_parts = []
 
         for page in document:
-
             page_text = page.get_text("text")
 
             if page_text:
@@ -181,18 +187,12 @@ async def upload_pdf(
         page_count = len(document)
 
         document.close()
-
-        # ------------------------------------------
-        # CHECK TEXT
-        # ------------------------------------------
+        document = None
 
         if not text.strip():
-
             return {
                 "error": (
-                    "This PDF does not contain extractable text. "
-                    "It may be a scanned/image-based PDF. "
-                    "Please upload a PDF with selectable text."
+                    "This PDF does not contain extractable text."
                 )
             }
 
@@ -203,7 +203,6 @@ async def upload_pdf(
         chunks = create_chunks(text)
 
         if not chunks:
-
             return {
                 "error": "Could not create text chunks from this PDF."
             }
@@ -221,7 +220,22 @@ async def upload_pdf(
         document_id = str(uuid.uuid4())
 
         # ------------------------------------------
-        # SAVE DOCUMENT
+        # UPLOAD ORIGINAL PDF TO SUPABASE
+        # ------------------------------------------
+
+        storage_path = f"{document_id}/{file.filename}"
+
+        supabase.storage.from_("pdfs").upload(
+            storage_path,
+            contents,
+            {
+                "content-type": "application/pdf",
+                "upsert": "false",
+            }
+        )
+
+        # ------------------------------------------
+        # SAVE RAG DATA
         # ------------------------------------------
 
         save_document(
@@ -240,8 +254,9 @@ async def upload_pdf(
             "filename": file.filename,
             "pages": page_count,
             "chunks": len(chunks),
+            "storage_path": storage_path,
             "message": (
-                "PDF uploaded, chunked and indexed successfully."
+                "PDF uploaded, stored and indexed successfully."
             )
         }
 
@@ -255,9 +270,11 @@ async def upload_pdf(
 
     finally:
 
+        if document is not None:
+            document.close()
+
         if os.path.exists(temp_path):
             os.remove(temp_path)
-
 
 # --------------------------------------------------
 # GET DOCUMENTS
