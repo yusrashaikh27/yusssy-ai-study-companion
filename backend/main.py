@@ -6,7 +6,7 @@ import httpx
 import os
 import uuid
 
-from pypdf import PdfReader
+import fitz
 
 from rag import (
     create_chunks,
@@ -142,152 +142,121 @@ async def upload_pdf(
 ):
 
     # Validate PDF
-
     if (
         not file.filename
-        or
-        not file.filename
-        .lower()
-        .endswith(".pdf")
+        or not file.filename.lower().endswith(".pdf")
     ):
-
         return {
-            "error":
-                "Only PDF files are allowed."
+            "error": "Only PDF files are allowed."
         }
 
-
     # Read uploaded file
-
     contents = await file.read()
 
-
     # Temporary file
+    temp_path = f"/tmp/{uuid.uuid4()}.pdf"
 
-    temp_path = (
-        f"/tmp/{uuid.uuid4()}.pdf"
-    )
-
-
-    with open(
-        temp_path,
-        "wb"
-    ) as pdf_file:
-
+    with open(temp_path, "wb") as pdf_file:
         pdf_file.write(contents)
-
 
     try:
 
         # ------------------------------------------
-        # EXTRACT TEXT
+        # EXTRACT TEXT USING PYMUPDF
         # ------------------------------------------
 
-        reader = PdfReader(
-            temp_path
-        )
+        document = fitz.open(temp_path)
 
-        text = ""
+        text_parts = []
 
-        for page in reader.pages:
+        for page in document:
 
-            page_text = (
-                page.extract_text()
-            )
+            page_text = page.get_text("text")
 
             if page_text:
+                text_parts.append(page_text)
 
-                text += (
-                    page_text
-                    + "\n"
-                )
+        text = "\n\n".join(text_parts)
 
+        page_count = len(document)
+
+        document.close()
+
+        # ------------------------------------------
+        # CHECK TEXT
+        # ------------------------------------------
 
         if not text.strip():
 
             return {
-                "error":
-                    "Could not extract text from this PDF."
+                "error": (
+                    "This PDF does not contain extractable text. "
+                    "It may be a scanned/image-based PDF. "
+                    "Please upload a PDF with selectable text."
+                )
             }
-
 
         # ------------------------------------------
         # CREATE CHUNKS
         # ------------------------------------------
 
-        chunks = create_chunks(
-            text
-        )
+        chunks = create_chunks(text)
 
+        if not chunks:
+
+            return {
+                "error": "Could not create text chunks from this PDF."
+            }
 
         # ------------------------------------------
         # CREATE EMBEDDINGS
         # ------------------------------------------
 
-        embeddings = (
-            create_embeddings(
-                chunks
-            )
-        )
-
+        embeddings = create_embeddings(chunks)
 
         # ------------------------------------------
         # CREATE DOCUMENT ID
         # ------------------------------------------
 
-        document_id = str(
-            uuid.uuid4()
-        )
-
+        document_id = str(uuid.uuid4())
 
         # ------------------------------------------
         # SAVE DOCUMENT
         # ------------------------------------------
 
         save_document(
-
             document_id,
-
             file.filename,
-
             chunks,
-
             embeddings
         )
-
 
         # ------------------------------------------
         # RESPONSE
         # ------------------------------------------
 
         return {
-
-            "document_id":
-                document_id,
-
-            "filename":
-                file.filename,
-
-            "pages":
-                len(reader.pages),
-
-            "chunks":
-                len(chunks),
-
-            "message":
+            "document_id": document_id,
+            "filename": file.filename,
+            "pages": page_count,
+            "chunks": len(chunks),
+            "message": (
                 "PDF uploaded, chunked and indexed successfully."
+            )
         }
 
+    except Exception as e:
+
+        print(f"PDF processing error: {e}")
+
+        return {
+            "error": f"PDF processing failed: {str(e)}"
+        }
 
     finally:
 
-        if os.path.exists(
-            temp_path
-        ):
-
-            os.remove(
-                temp_path
-            )
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # --------------------------------------------------

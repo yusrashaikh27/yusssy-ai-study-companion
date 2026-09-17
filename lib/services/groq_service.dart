@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class GroqService {
-  static const String backendUrl = 'http://192.168.1.9:8000/chat';
-
+  static const String backendUrl =
+      'https://yusssy-ai-study-companion.onrender.com/chat';
   static Future<String> sendMessage(List<Map<String, dynamic>> messages) async {
     final response = await http.post(
       Uri.parse(backendUrl),

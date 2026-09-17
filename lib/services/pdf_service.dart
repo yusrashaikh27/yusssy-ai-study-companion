@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class PdfService {
-  static const String baseUrl = 'http://192.168.1.9:8000';
+  static const String baseUrl =
+      'https://yusssy-ai-study-companion.onrender.com';
 
   // --------------------------------------------------
   // UPLOAD PDF
@@ -13,30 +14,48 @@ class PdfService {
     String filePath,
     String fileName,
   ) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('$baseUrl/upload-pdf'),
-    );
+    try {
+      print('PDF UPLOAD STARTED');
+      print('File: $fileName');
+      print('Path: $filePath');
 
-    request.files.add(
-      await http.MultipartFile.fromPath('file', filePath, filename: fileName),
-    );
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$baseUrl/upload-pdf'),
+      );
 
-    final response = await request.send();
+      request.files.add(
+        await http.MultipartFile.fromPath('file', filePath, filename: fileName),
+      );
 
-    final responseBody = await response.stream.bytesToString();
+      print('Sending PDF to Render...');
 
-    if (response.statusCode != 200) {
-      throw Exception('Upload failed: ${response.statusCode}');
+      final response = await request.send();
+
+      final responseBody = await response.stream.bytesToString();
+
+      print('Upload status: ${response.statusCode}');
+      print('Upload response: $responseBody');
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Upload failed (${response.statusCode}): $responseBody',
+        );
+      }
+
+      final data = jsonDecode(responseBody);
+
+      if (data['error'] != null) {
+        throw Exception(data['error']);
+      }
+
+      print('PDF UPLOAD SUCCESSFUL');
+
+      return Map<String, dynamic>.from(data);
+    } catch (e) {
+      print('PDF UPLOAD ERROR: $e');
+      rethrow;
     }
-
-    final data = jsonDecode(responseBody);
-
-    if (data['error'] != null) {
-      throw Exception(data['error']);
-    }
-
-    return data;
   }
 
   // --------------------------------------------------
@@ -44,19 +63,29 @@ class PdfService {
   // --------------------------------------------------
 
   static Future<List<Map<String, dynamic>>> getDocuments() async {
-    final response = await http.get(Uri.parse('$baseUrl/documents'));
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/documents'));
 
-    if (response.statusCode != 200) {
-      throw Exception('Could not load documents.');
+      print('Documents status: ${response.statusCode}');
+      print('Documents response: ${response.body}');
+
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Could not load documents: ${response.statusCode} ${response.body}',
+        );
+      }
+
+      final data = jsonDecode(response.body);
+
+      if (data['documents'] == null) {
+        return [];
+      }
+
+      return List<Map<String, dynamic>>.from(data['documents']);
+    } catch (e) {
+      print('GET DOCUMENTS ERROR: $e');
+      rethrow;
     }
-
-    final data = jsonDecode(response.body);
-
-    if (data['documents'] == null) {
-      return [];
-    }
-
-    return List<Map<String, dynamic>>.from(data['documents']);
   }
 
   // --------------------------------------------------
@@ -64,25 +93,33 @@ class PdfService {
   // --------------------------------------------------
 
   static Future<String> askPdf(String question, String documentId) async {
-    final response = await http.post(
-      Uri.parse('$baseUrl/ask-pdf'),
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/ask-pdf'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'question': question, 'document_id': documentId}),
+      );
 
-      headers: {'Content-Type': 'application/json'},
+      print('Ask PDF status: ${response.statusCode}');
+      print('Ask PDF response: ${response.body}');
 
-      body: jsonEncode({'question': question, 'document_id': documentId}),
-    );
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Server error (${response.statusCode}): ${response.body}',
+        );
+      }
 
-    if (response.statusCode != 200) {
-      throw Exception('Server error: ${response.statusCode}');
+      final data = jsonDecode(response.body);
+
+      if (data['error'] != null) {
+        throw Exception(data['error']);
+      }
+
+      return data['response'];
+    } catch (e) {
+      print('ASK PDF ERROR: $e');
+      rethrow;
     }
-
-    final data = jsonDecode(response.body);
-
-    if (data['error'] != null) {
-      throw Exception(data['error']);
-    }
-
-    return data['response'];
   }
 
   // --------------------------------------------------
@@ -90,18 +127,29 @@ class PdfService {
   // --------------------------------------------------
 
   static Future<void> deleteDocument(String documentId) async {
-    final response = await http.delete(
-      Uri.parse('$baseUrl/documents/$documentId'),
-    );
+    try {
+      final response = await http.delete(
+        Uri.parse('$baseUrl/documents/$documentId'),
+      );
 
-    if (response.statusCode != 200) {
-      throw Exception('Could not delete document.');
-    }
+      print('Delete status: ${response.statusCode}');
+      print('Delete response: ${response.body}');
 
-    final data = jsonDecode(response.body);
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Could not delete document: '
+          '${response.statusCode} ${response.body}',
+        );
+      }
 
-    if (data['error'] != null) {
-      throw Exception(data['error']);
+      final data = jsonDecode(response.body);
+
+      if (data['error'] != null) {
+        throw Exception(data['error']);
+      }
+    } catch (e) {
+      print('DELETE DOCUMENT ERROR: $e');
+      rethrow;
     }
   }
 }
