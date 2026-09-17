@@ -2,7 +2,6 @@ fastapi
 uvicorn
 httpx
 python-dotenv
-sentence-transformers
 numpy
 pypdf
 python-multipart

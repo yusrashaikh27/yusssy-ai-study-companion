@@ -1,8 +1,10 @@
 import os
 import json
-import numpy as np
+import math
+import re
+import shutil
 
-from sentence_transformers import SentenceTransformer
+import numpy as np
 
 
 # --------------------------------------------------
@@ -17,16 +19,18 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 
 # --------------------------------------------------
-# EMBEDDING MODEL
+# TEXT PROCESSING
 # --------------------------------------------------
 
-print("Loading embedding model...")
+def tokenize(text):
+    """
+    Convert text into simple lowercase word tokens.
+    """
 
-model = SentenceTransformer(
-    "all-MiniLM-L6-v2"
-)
-
-print("Embedding model loaded!")
+    return re.findall(
+        r"\b[a-zA-Z0-9]+\b",
+        text.lower()
+    )
 
 
 # --------------------------------------------------
@@ -65,20 +69,132 @@ def create_chunks(
 
 
 # --------------------------------------------------
+# TF-IDF
+# --------------------------------------------------
+
+def build_tfidf(chunks):
+
+    if not chunks:
+        return (
+            np.array([]),
+            {},
+            []
+        )
+
+    tokenized_chunks = [
+        tokenize(chunk)
+        for chunk in chunks
+    ]
+
+    # Build vocabulary
+    vocabulary = {}
+
+    for tokens in tokenized_chunks:
+
+        for token in set(tokens):
+
+            if token not in vocabulary:
+
+                vocabulary[token] = len(vocabulary)
+
+    vocab_size = len(vocabulary)
+
+    # Document frequency
+    document_frequency = np.zeros(
+        vocab_size,
+        dtype=np.float32
+    )
+
+    for tokens in tokenized_chunks:
+
+        for token in set(tokens):
+
+            index = vocabulary[token]
+
+            document_frequency[index] += 1
+
+    number_of_documents = len(chunks)
+
+    # IDF
+    idf = (
+        np.log(
+            (number_of_documents + 1)
+            /
+            (document_frequency + 1)
+        )
+        + 1
+    )
+
+    # TF-IDF matrix
+    matrix = np.zeros(
+        (
+            number_of_documents,
+            vocab_size
+        ),
+        dtype=np.float32
+    )
+
+    for row, tokens in enumerate(tokenized_chunks):
+
+        if not tokens:
+            continue
+
+        counts = {}
+
+        for token in tokens:
+
+            if token in vocabulary:
+
+                counts[token] = (
+                    counts.get(token, 0) + 1
+                )
+
+        total_words = len(tokens)
+
+        for token, count in counts.items():
+
+            column = vocabulary[token]
+
+            tf = count / total_words
+
+            matrix[row, column] = (
+                tf * idf[column]
+            )
+
+    # Normalize vectors
+    norms = np.linalg.norm(
+        matrix,
+        axis=1,
+        keepdims=True
+    )
+
+    norms[norms == 0] = 1
+
+    matrix = matrix / norms
+
+    return (
+        matrix,
+        vocabulary,
+        idf.tolist()
+    )
+
+
+# --------------------------------------------------
 # CREATE EMBEDDINGS
 # --------------------------------------------------
 
 def create_embeddings(chunks):
 
-    if not chunks:
-        return np.array([])
+    """
+    Lightweight TF-IDF vectors.
 
-    embeddings = model.encode(
-        chunks,
-        normalize_embeddings=True
-    )
+    Kept under the same function name so the
+    rest of the application can continue using it.
+    """
 
-    return np.array(embeddings)
+    matrix, _, _ = build_tfidf(chunks)
+
+    return matrix
 
 
 # --------------------------------------------------
@@ -102,10 +218,16 @@ def save_document(
         exist_ok=True
     )
 
+    # Rebuild TF-IDF metadata so the same
+    # vocabulary can be used for questions.
+    _, vocabulary, idf = build_tfidf(chunks)
+
     metadata = {
         "document_id": document_id,
         "filename": filename,
-        "chunks": chunks
+        "chunks": chunks,
+        "vocabulary": vocabulary,
+        "idf": idf
     }
 
     metadata_path = os.path.join(
@@ -177,10 +299,23 @@ def load_document(document_id):
     )
 
     return {
-        "document_id": metadata["document_id"],
-        "filename": metadata["filename"],
-        "chunks": metadata["chunks"],
-        "embeddings": embeddings
+        "document_id":
+            metadata["document_id"],
+
+        "filename":
+            metadata["filename"],
+
+        "chunks":
+            metadata["chunks"],
+
+        "embeddings":
+            embeddings,
+
+        "vocabulary":
+            metadata.get("vocabulary", {}),
+
+        "idf":
+            metadata.get("idf", [])
     }
 
 
@@ -261,22 +396,89 @@ def search_document(
 
     embeddings = document["embeddings"]
 
+    vocabulary = document["vocabulary"]
+
+    idf = document["idf"]
+
     if len(chunks) == 0:
         return []
 
-    # Create embedding for user question
-    question_embedding = model.encode(
-        [question],
-        normalize_embeddings=True
-    )[0]
+    # --------------------------------------------------
+    # Backward compatibility
+    # --------------------------------------------------
 
-    # Cosine similarity
-    similarities = np.dot(
-        embeddings,
-        question_embedding
+    # Old documents created with the previous
+    # SentenceTransformer system won't have
+    # TF-IDF metadata.
+
+    if not vocabulary or not idf:
+
+        embeddings, vocabulary, idf = build_tfidf(
+            chunks
+        )
+
+    # --------------------------------------------------
+    # Create question vector
+    # --------------------------------------------------
+
+    question_tokens = tokenize(
+        question
     )
 
+    question_vector = np.zeros(
+        len(vocabulary),
+        dtype=np.float32
+    )
+
+    counts = {}
+
+    for token in question_tokens:
+
+        if token in vocabulary:
+
+            counts[token] = (
+                counts.get(token, 0) + 1
+            )
+
+    total_words = len(question_tokens)
+
+    if total_words > 0:
+
+        for token, count in counts.items():
+
+            column = vocabulary[token]
+
+            question_vector[column] = (
+                (count / total_words)
+                * idf[column]
+            )
+
+    # Normalize question vector
+    question_norm = np.linalg.norm(
+        question_vector
+    )
+
+    if question_norm > 0:
+
+        question_vector = (
+            question_vector
+            /
+            question_norm
+        )
+
+    # --------------------------------------------------
+    # Cosine similarity
+    # --------------------------------------------------
+
+    similarities = np.dot(
+        embeddings,
+        question_vector
+    )
+
+    # --------------------------------------------------
     # Get highest scores
+    # --------------------------------------------------
+
     top_indices = np.argsort(
         similarities
     )[::-1][:top_k]
@@ -286,10 +488,13 @@ def search_document(
     for index in top_indices:
 
         results.append({
-            "chunk": chunks[index],
-            "score": float(
-                similarities[index]
-            )
+            "chunk":
+                chunks[index],
+
+            "score":
+                float(
+                    similarities[index]
+                )
         })
 
     return results
@@ -310,8 +515,6 @@ def delete_document(document_id):
         document_folder
     ):
         return False
-
-    import shutil
 
     shutil.rmtree(
         document_folder
